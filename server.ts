@@ -8,7 +8,7 @@ import {WebSocketServer,WebSocket} from 'ws';
 const root=path.dirname(fileURLToPath(import.meta.url));
 const cwd=path.resolve(process.env.PI_CHAT_CWD || process.cwd());
 const port=Number(process.env.PI_CHAT_PORT||8791);
-const dir=path.join(root,'state');await mkdir(path.join(dir,'sessions'),{recursive:true});
+const dir=path.resolve(process.env.PI_CHAT_STATE_DIR || path.join(root,'state'));await mkdir(path.join(dir,'sessions'),{recursive:true});
 type RecordValue=Record<string,any>;
 type Session={key:string;title:string;file?:string};
 let registry:{active:string;sessions:Session[]};
@@ -104,7 +104,7 @@ const server=http.createServer(async(req,res)=>{
 const wss=new WebSocketServer({noServer:true,maxPayload:256*1024});
 server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws'||!allowedHosts.has(req.headers.host||'')||!origins.has(req.headers.origin||'')){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req))});
 wss.on('connection',ws=>{clients.add(ws);ws.send(JSON.stringify(snapshot()));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
-server.listen(port,'127.0.0.1',()=>console.log(`Pi Chat http://localhost:${port} · ${cwd}`));
-void start().catch(e=>notice('初始化失败：'+e.message));
+server.on('error',e=>{console.error(e.message);process.exit(1)});
+server.listen(port,'127.0.0.1',()=>{console.log(`Pi Chat http://localhost:${port} · ${cwd}`);void start().catch(e=>notice('初始化失败：'+e.message))});
 function shutdown(){server.close();for(const ws of clients)ws.close();child?.stdin.end();setTimeout(()=>{child?.kill('SIGTERM');process.exit()},3000).unref()}
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);

@@ -1,1 +1,16 @@
-{"name":"pi-chat-local","private":true,"type":"module","scripts":{"start":"tsx server.ts","check":"tsc --noEmit"},"dependencies":{"dompurify":"^3.3.0","katex":"^0.16.0","marked":"^17.0.0","ws":"^8.18.0"},"devDependencies":{"@types/node":"^22.0.0","@types/ws":"^8.18.0","tsx":"^4.20.0","typescript":"^5.9.0"},"keywords":["pi","pi-coding-agent","web-ui","local-first","typescript"]}
+{
+  "name": "pi-chat-local",
+  "version": "0.1.0",
+  "description": "Minimal local-first browser interface for Pi coding agent",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "repository": { "type": "git", "url": "https://github.com/Zhangbo-cn/pi-chat.git" },
+  "bin": { "pi-chat-local": "bin/pi-chat.js" },
+  "files": ["bin/", "extensions/", "public/", "server.ts", "README.md", "LICENSE"],
+  "pi": { "extensions": ["./extensions/pi-chat.js"] },
+  "scripts": { "start": "tsx server.ts", "check": "tsc --noEmit" },
+  "dependencies": { "dompurify": "^3.3.0", "katex": "^0.16.0", "marked": "^17.0.0", "ws": "^8.18.0", "tsx": "^4.20.0" },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/ws": "^8.18.0", "typescript": "^5.9.0" },
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "web-ui", "local-first", "typescript"]
+}

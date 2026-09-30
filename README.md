@@ -65,6 +65,18 @@ Topics are GitHub repository metadata, not Git release tags. This project uses t
 
 ## Pi package status
 
-This is currently a standalone RPC web client, not an installable Pi extension package. According to the [Pi package documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md), npm packages with the `pi-package` keyword are eligible for discovery in the [package gallery](https://pi.dev/packages). A GitHub `pi` topic alone does not register a package.
+A lightweight Pi extension exposes `/pi-chat` and `/pi-chat stop` in the terminal UI. It starts a separate local RPC server for the current working directory; it does not mirror the terminal conversation. Exiting/reloading Pi stops the owned server. It does not automatically open a browser or start on extension load.
 
-Before distribution as a Pi package, add and test a supported resource (such as an extension that launches the local UI), define the package manifest and publishable files, choose a license, and verify installation from a clean environment. npm publication and gallery listing have not been performed.
+```sh
+pi install git:github.com/Zhangbo-cn/pi-chat
+# Restart Pi, then run /pi-chat
+# Visit http://localhost:8791
+```
+
+The extension and `pi-chat-local` executable store state under `~/.pi/pi-chat/<workspace-hash>/`, outside the package installation. Override with `PI_CHAT_STATE_DIR`. Only one server may use a state directory; use a different port and state directory for concurrent servers. The existing `npm start` workflow keeps checkout-local `state/` unless overridden. A busy port fails without taking over or stopping an existing server. Extension startup logs are in the state directory's `server.log`.
+
+The package includes an explicit Pi manifest, a publish-file allowlist and the `pi-package` keyword. npm authentication/publication and [gallery](https://pi.dev/packages) discovery remain pending. After npm publication, installation will also be available with `pi install npm:pi-chat-local`.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
