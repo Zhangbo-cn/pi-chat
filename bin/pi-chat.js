@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { register } from 'node:module';
+import { register } from 'tsx/esm/api';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -9,6 +9,6 @@ if (process.argv.includes('--help')) {
   const cwd = path.resolve(process.env.PI_CHAT_CWD || process.cwd());
   const key = createHash('sha256').update(cwd).digest('hex').slice(0, 16);
   process.env.PI_CHAT_STATE_DIR ||= path.join(homedir(), '.pi', 'pi-chat', key);
-  register('tsx/esm', import.meta.url);
+  register();
   await import('../server.ts');
 }

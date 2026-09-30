@@ -5,7 +5,10 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {WebSocketServer,WebSocket} from 'ws';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
 const root=path.dirname(fileURLToPath(import.meta.url));
+const vendorRoot=path.dirname(require.resolve('katex/package.json'));
 const cwd=path.resolve(process.env.PI_CHAT_CWD || process.cwd());
 const port=Number(process.env.PI_CHAT_PORT||8791);
 const dir=path.resolve(process.env.PI_CHAT_STATE_DIR || path.join(root,'state'));await mkdir(path.join(dir,'sessions'),{recursive:true});
@@ -99,7 +102,7 @@ const server=http.createServer(async(req,res)=>{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'");
  if(url.pathname==='/health'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:ready,phase}));return}
  let entry=assets[url.pathname];if(/^\/vendor\/fonts\/[\w.-]+\.(woff2?|ttf)$/.test(url.pathname))entry=['node_modules/katex/dist/fonts/'+path.basename(url.pathname),'font/woff2'];
- if(!entry){res.writeHead(404).end();return}try{res.setHeader('Content-Type',entry[1]+'; charset=utf-8');res.end(await readFile(path.join(root,entry[0])))}catch{res.writeHead(404).end()}
+ if(!entry){res.writeHead(404).end();return}try{res.setHeader('Content-Type',entry[1]+'; charset=utf-8');const assetPath=entry[0].startsWith('node_modules/')?(entry[0].startsWith('node_modules/katex/')?path.join(vendorRoot,entry[0].slice('node_modules/katex/'.length)):entry[0].startsWith('node_modules/dompurify/')?path.join(path.dirname(require.resolve('dompurify')),'purify.min.js'):path.join(path.dirname(require.resolve(entry[0].split('/')[1]+'/package.json')),entry[0].split('/').slice(2).join('/'))):path.join(root,entry[0]);res.end(await readFile(assetPath))}catch{res.writeHead(404).end()}
 });
 const wss=new WebSocketServer({noServer:true,maxPayload:256*1024});
 server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws'||!allowedHosts.has(req.headers.host||'')||!origins.has(req.headers.origin||'')){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req))});
