@@ -11,11 +11,17 @@ pre{overflow:auto;white-space:pre-wrap;background:#f7f7f7;padding:14px;border-ra
 .activity{margin:6px 0;min-width:0}
 .activity .tool{margin:0;color:#767676;line-height:1.7;font-size:12px}
 .activity .tool summary{padding:2px 0;display:flex;align-items:center;gap:10px}
-.activity .tool summary::before{content:'›';flex-shrink:0}
-.activity .tool[open] summary::before{content:'⌄'}
+.activity .tool summary::before{content:'';width:8px;height:8px;border-right:1.5px solid currentColor;border-top:1.5px solid currentColor;transform:rotate(45deg);flex-shrink:0;margin:0 5px 0 2px}
+.activity .tool[open] summary::before{transform:rotate(135deg)}
 .activity .tool summary>span:first-child{flex-shrink:0}
 .activity-preview{color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .activity .tool[open] .activity-preview{display:none}
 .activity .tool pre{margin:8px 0 0;color:#555;background:#f7f7f8;line-height:1.7}
 .assistant.activity-only{margin-bottom:12px}
 .assistant.activity-only .activity:last-child{margin-bottom:0}
+.run-progress{max-width:744px;margin:14px auto;display:flex;align-items:center;gap:9px;color:#767676;font-size:12px;min-height:24px}
+.run-progress[hidden]{display:none}
+.run-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:run-pulse 1.4s ease-in-out infinite}
+@keyframes run-pulse{50%{opacity:.25}}
+.run-progress.disconnected .run-dot{animation:none}
+@media(prefers-reduced-motion:reduce){.run-dot{animation:none}}
