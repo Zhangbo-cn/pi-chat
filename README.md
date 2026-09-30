@@ -59,4 +59,12 @@ No database, model API wrapper or duplicate tool executor. The initial browser U
 
 ## GitHub
 
-The repository is initialized locally; no remote or publication is performed automatically. After creating a GitHub repository, add its remote and push. Topics are GitHub repository metadata, not Git release tags; set the topics above in the repository's About section. A `pi` topic is intentional; no release tag is created for unfinished code.
+Repository: https://github.com/Zhangbo-cn/pi-chat
+
+Topics are GitHub repository metadata, not Git release tags. This project uses the topics listed above; no release tag is created for unfinished code.
+
+## Pi package status
+
+This is currently a standalone RPC web client, not an installable Pi extension package. According to the [Pi package documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md), npm packages with the `pi-package` keyword are eligible for discovery in the [package gallery](https://pi.dev/packages). A GitHub `pi` topic alone does not register a package.
+
+Before distribution as a Pi package, add and test a supported resource (such as an extension that launches the local UI), define the package manifest and publishable files, choose a license, and verify installation from a clean environment. npm publication and gallery listing have not been performed.

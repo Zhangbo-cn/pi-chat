@@ -5,3 +5,4 @@ state/
 !.env.example
 *.log
 test-results/
+demo/
