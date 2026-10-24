@@ -32,14 +32,22 @@ function judgeGoal(ev:string){return new Promise<{verdict:'met'|'not_met'|'impos
 function finishGoal(status:GoalStatus,reason:string){goal.status=status;goal.lastReason=reason;void saveGoal();notice('目标'+(status==='done'?'已达成':status==='failed'?'判定不可达':status==='paused'?'已暂停':'已停止')+'：'+reason);broadcast()}
 async function continueGoal(reason:string,missing:string[]=[]){if(goal.status!=='running')return;if(goal.turns>=goal.maxTurns){finishGoal('stopped','达到轮次上限 '+goal.maxTurns);return}const text='[goal-continue] 轮次 '+goal.turns+'/'+goal.maxTurns+' · 上轮评审：'+(reason||'未通过')+(missing.length?'\n待补齐：'+missing.join('；'):'')+'\n目标与验收标准见最初的 /goal 指令。请继续推进：先执行必要的工具动作，用真实输出证明进展；不要只做口头声明。';busy=true;phase='目标推进';broadcast();try{await rpc('prompt',{message:text})}catch(e){busy=false;phase='就绪';finishGoal('paused','续跑发送失败：'+(e as Error).message)}}
 async function onGoalSettled(){if(goal.status!=='running'||goalBusy)return;goalBusy=true;try{goal.turns++;if(goal.turns>goal.maxTurns){finishGoal('stopped','达到轮次上限 '+goal.maxTurns);return}if(Date.now()-goal.startedAt>goal.maxMinutes*60000){finishGoal('stopped','超过时间上限 '+goal.maxMinutes+' 分钟');return}if(turnTools===0){stalledTurns++;if(stalledTurns>=2){finishGoal('stopped','连续两轮没有工具动作（停滞检测）');return}}else stalledTurns=0;let verdict:'met'|'not_met'|'impossible';let reason:string;let missing:string[]=[];if(goal.verify){const r=await runVerify(goal.verify);verdict=r.ok?'met':'not_met';reason=r.ok?'验收命令通过':('验收命令未通过：'+r.out.slice(-200));if(!r.ok)missing=[r.out.slice(-200)]}else{const j=await judgeGoal(evidence());verdict=j.verdict;reason=j.reason;missing=j.missing}goal.history.push({turn:goal.turns,verdict,reason});if(goal.history.length>50)goal.history=goal.history.slice(-50);if(verdict==='met'){finishGoal('done',reason||'验收通过');return}if(verdict==='impossible'){finishGoal('failed',reason||'判定不可达');return}goal.lastReason=reason;await saveGoal();await continueGoal(reason,missing)}catch(e){finishGoal('paused','评审异常：'+(e as Error).message)}finally{goalBusy=false;turnTools=0}}
-let child:ChildProcessWithoutNullStreams, dead=false,ready=false,busy=false,phase='启动中',state:RecordValue={},messages:RecordValue[]=[],models:RecordValue[]=[],levels:string[]=[],commands:RecordValue[]=[],dialogs:RecordValue[]=[],notices:string[]=[],activeMessage=-1;
+let child:ChildProcessWithoutNullStreams, dead=false,ready=false,busy=false,phase='启动中',state:RecordValue={},messages:RecordValue[]=[],models:RecordValue[]=[],levels:string[]=[],commands:RecordValue[]=[],dialogs:RecordValue[]=[],notices:{id:string;text:string}[]=[],activeMessage=-1,noticeSeq=0;
 const tools=new Map<string,RecordValue>();
 const pending=new Map<string,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
 const clients=new Set<WebSocket>();
 let revision=0,timer:ReturnType<typeof setTimeout>|undefined;
-function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices,goal:goalPublic()}}
+function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices:notices.map(n=>n.text),goal:goalPublic()}}
 function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;const data=JSON.stringify(snapshot());for(const ws of clients){if(ws.bufferedAmount>8e6){ws.close(1013,'Reconnect');continue}if(ws.readyState===WebSocket.OPEN)ws.send(data)}},70)}
-function notice(s:string){notices.push(s);notices=notices.slice(-8);broadcast()}
+const NOTICE_TTL_MS=Number(process.env.PI_CHAT_NOTICE_TTL_MS||30000);
+function notice(s:string){
+ if(notices.length&&notices[notices.length-1].text===s)return;
+ const item={id:String(++noticeSeq),text:s};
+ notices.push(item);notices=notices.slice(-8);broadcast();
+ const t=setTimeout(()=>{const i=notices.findIndex(n=>n.id===item.id);if(i>=0){notices.splice(i,1);broadcast()}},NOTICE_TTL_MS);
+ (t as any).unref?.();
+}
+function clearGoalNotices(){const before=notices.length;notices=notices.filter(n=>!n.text.startsWith('目标')&&!n.text.startsWith('/goal '));if(notices.length!==before)broadcast()}
 function write(record:RecordValue){return new Promise<void>((resolve,reject)=>{if(dead||!child?.stdin.writable)return reject(new Error('Pi 进程不可用，请重启服务'));child.stdin.write(JSON.stringify(record)+'\n',e=>e?reject(e):resolve())})}
 function rpc(type:string,fields:RecordValue={}){const id=randomUUID();return new Promise<any>((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`${type} 响应超时；未自动重发，请检查当前状态`))},120000);pending.set(id,{resolve,reject,timer});write({type,...fields,id}).catch(e=>{clearTimeout(timer);pending.delete(id);reject(e)})})}
 async function refresh(){state=await rpc('get_state');levels=(await rpc('get_available_thinking_levels')).levels;const s=registry.sessions.find(s=>s.key===registry.active)!;if(state.sessionFile)s.file=state.sessionFile;await save();broadcast()}
@@ -85,7 +93,7 @@ async function startGoal(objective:any,verifyRaw:any,maxTurnsRaw:any,maxMinutesR
  if(goalBusy)throw new Error('上一目标正在评审中，请稍候再试');
  const verify=typeof verifyRaw==='string'&&verifyRaw.trim()?verifyRaw.trim():null;
  goal={status:'running',objective:objective.trim(),verify,maxTurns:Math.min(Math.max(Number(maxTurnsRaw)||8,1),50),maxMinutes:Math.min(Math.max(Number(maxMinutesRaw)||30,1),240),turns:0,startedAt:Date.now(),lastReason:'',history:[]};
- stalledTurns=0;turnTools=0;void saveGoal();
+ stalledTurns=0;turnTools=0;clearGoalNotices();void saveGoal();
  const s=registry.sessions.find(x=>x.key===registry.active)!;if(s.title==='新对话'){s.title='目标：'+goal.objective.slice(0,24);await save()}
  busy=true;phase='目标启动';broadcast();
  const kick='目标：'+goal.objective+'\n\n验收方式：'+(verify?'命令 `'+verify+'` 退出码为 0':'由独立评审模型根据对话中的证据判定')+'\n\n现在开始执行。每轮结束前给出：做了什么、证据（命令/文件/测试的真实输出）、还差什么。不要只声明完成。';
@@ -94,7 +102,7 @@ async function startGoal(objective:any,verifyRaw:any,maxTurnsRaw:any,maxMinutesR
 }
 async function stopGoal(){
  if(!['running','paused'].includes(goal.status))return goalPublic();
- const wasRunning=goal.status==='running';goal.status='stopped';goal.lastReason='用户停止';void saveGoal();broadcast();
+ const wasRunning=goal.status==='running';goal.status='stopped';goal.lastReason='用户停止';clearGoalNotices();void saveGoal();broadcast();
  if(wasRunning&&busy){try{await rpc('clear_queue');await rpc('abort')}catch{}}
  return goalPublic();
 }
