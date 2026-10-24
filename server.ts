@@ -93,6 +93,7 @@ function handle(e:RecordValue){
 async function start(){
  const session=registry.sessions.find(s=>s.key===registry.active)!;
  const args=['--mode','rpc','--session-dir',path.join(dir,'sessions')];if(session.file)args.push('--session',session.file);
+ args.push('--append-system-prompt','This session is served by the pi-chat web bridge, a systemd unit named pi-chat. Never kill, stop, restart or reconfigure that process or unit, and never run kill/pkill on node processes that serve this session. If a restart seems necessary, ask the user to do it.');
  child=spawn(process.env.PI_CHAT_BIN||'pi',args,{cwd,env:process.env,stdio:['pipe','pipe','pipe']});
  let buffer='';child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{buffer+=chunk;let idx;while((idx=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,idx);buffer=buffer.slice(idx+1);if(line.trim())try{handle(JSON.parse(line))}catch{notice('Pi 返回无法解析的协议记录')}}});
  child.stderr.on('data',chunk=>process.stderr.write(chunk));
@@ -119,10 +120,18 @@ async function startGoal(objective:any,verifyRaw:any,maxTurnsRaw:any,maxMinutesR
  return goalPublic();
 }
 async function stopGoal(){
+ if(['done','failed','stopped'].includes(goal.status))return clearGoal();
  if(!['running','paused'].includes(goal.status))return goalPublic();
  const wasRunning=goal.status==='running';goal.status='stopped';goal.lastReason='用户停止';clearGoalNotices();void saveGoal();broadcast();
  if(wasRunning&&busy){try{await rpc('clear_queue');await rpc('abort')}catch{}}
  return goalPublic();
+}
+function clearTerminalGoal(){if(['done','failed','stopped'].includes(goal.status)){goal={status:'idle',objective:'',verify:null,maxTurns:8,maxMinutes:30,turns:0,startedAt:0,lastReason:'',history:[]};clearGoalNotices();void saveGoal();return true}return false}
+async function clearGoal(){
+ if(goal.status==='running')throw new Error('目标进行中，请先 /goal stop');
+ if(goalBusy)throw new Error('评审进行中，请稍后再清除');
+ goal={status:'idle',objective:'',verify:null,maxTurns:8,maxMinutes:30,turns:0,startedAt:0,lastReason:'',history:[]};
+ stalledTurns=0;turnTools=0;clearGoalNotices();await saveGoal();broadcast();return goalPublic();
 }
 async function resumeGoal(){
  if(goal.status!=='paused')throw new Error('仅暂停的目标可以继续');
@@ -130,7 +139,8 @@ async function resumeGoal(){
 }
 function parseGoalArg(text:string){
  if(!text||/^status$/i.test(text))return {op:'status' as const};
- if(/^(stop|clear|cancel|off|pause)$/i.test(text))return {op:'stop' as const};
+ if(/^(clear|off|dismiss)$/i.test(text))return {op:'clear' as const};
+ if(/^(stop|cancel|pause)$/i.test(text))return {op:'stop' as const};
  if(/^resume$/i.test(text))return {op:'resume' as const};
  const v=text.match(/--verify(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/);
  const t=text.match(/--turns(?:=|\s+)(\d+)/);
@@ -195,6 +205,7 @@ async function command(c:RecordValue){
  if(c.action==='stop'){const q=await rpc('clear_queue');await rpc('abort');return q}
  if(c.action==='goal-start')return startGoal(c.objective,c.verify,c.maxTurns,c.maxMinutes);
  if(c.action==='goal-stop')return stopGoal();
+ if(c.action==='goal-clear')return clearGoal();
  if(c.action==='goal-resume')return resumeGoal();
  if(c.action==='history'){
   const before=Math.max(0,Math.floor(Number(c.before)||0));
@@ -217,11 +228,12 @@ async function command(c:RecordValue){
    if(busy)throw new Error('请等待当前任务完成，或先停止');
    if(/^\/goal(\s|$)/i.test(c.message.trim())){
     const cmd=parseGoalArg(c.message.trim().replace(/^\/goal\s*/i,'').trim());
-    const data=cmd.op==='status'?goalPublic():cmd.op==='stop'?await stopGoal():cmd.op==='resume'?await resumeGoal():await startGoal(cmd.objective,cmd.verify,cmd.maxTurns,undefined);
+    const data=cmd.op==='status'?goalPublic():cmd.op==='clear'?await clearGoal():cmd.op==='stop'?await stopGoal():cmd.op==='resume'?await resumeGoal():await startGoal(cmd.objective,cmd.verify,cmd.maxTurns,undefined);
     if(cmd.op!=='status')notice('/goal '+cmd.op+' 已由服务端处理');
     return data;
    }
    const slash=c.message.match(/^\/(\S+)/)?.[1];if(slash&&!commands.some(x=>x.name===slash))throw new Error('此命令不是已加载的扩展、技能或模板（网页支持：/goal 与 ⚡ 标记的终端命令）；其余终端界面命令不在网页执行');
+   clearTerminalGoal();
    if(goal.status==='running'){goal.status='paused';goal.lastReason='用户插话，目标已暂停（/goal resume 继续）';void saveGoal()}
    busy=true;phase='发送中';broadcast();
    try{await rpc('prompt',{message:c.message})}catch(e){busy=false;phase='就绪';throw e}
@@ -231,7 +243,7 @@ async function command(c:RecordValue){
    const target=c.action==='switch'?registry.sessions.find(s=>s.key===c.key):undefined;if(c.action==='switch'&&!target)throw new Error('找不到会话');
    const result=await rpc(target?.file?'switch_session':'new_session',target?.file?{sessionPath:target.file}:{});if(result?.cancelled)throw new Error('扩展取消了会话切换');
    if(target)registry.active=target.key;else{const s={key:randomUUID(),title:'新对话'};registry.sessions.unshift(s);registry.active=s.key}
-   tools.clear();messages=(await rpc('get_messages')).messages;epoch++;await refresh();
+   tools.clear();messages=(await rpc('get_messages')).messages;epoch++;clearTerminalGoal();await refresh();
   }else if(c.action==='model'){
    if(busy)throw new Error('运行中不能切换模型');if(!models.some(m=>m.id===c.modelId&&m.provider===c.provider))throw new Error('未知模型');await rpc('set_model',{modelId:c.modelId,provider:c.provider});await refresh();
   }else if(c.action==='thinking'){
