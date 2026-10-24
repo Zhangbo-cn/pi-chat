@@ -32,13 +32,19 @@ function judgeGoal(ev:string){return new Promise<{verdict:'met'|'not_met'|'impos
 function finishGoal(status:GoalStatus,reason:string){goal.status=status;goal.lastReason=reason;void saveGoal();notice('目标'+(status==='done'?'已达成':status==='failed'?'判定不可达':status==='paused'?'已暂停':'已停止')+'：'+reason);broadcast()}
 async function continueGoal(reason:string,missing:string[]=[]){if(goal.status!=='running')return;if(goal.turns>=goal.maxTurns){finishGoal('stopped','达到轮次上限 '+goal.maxTurns);return}const text='[goal-continue] 轮次 '+goal.turns+'/'+goal.maxTurns+' · 上轮评审：'+(reason||'未通过')+(missing.length?'\n待补齐：'+missing.join('；'):'')+'\n目标与验收标准见最初的 /goal 指令。请继续推进：先执行必要的工具动作，用真实输出证明进展；不要只做口头声明。';busy=true;phase='目标推进';broadcast();try{await rpc('prompt',{message:text})}catch(e){busy=false;phase='就绪';finishGoal('paused','续跑发送失败：'+(e as Error).message)}}
 async function onGoalSettled(){if(goal.status!=='running'||goalBusy)return;goalBusy=true;try{goal.turns++;if(goal.turns>goal.maxTurns){finishGoal('stopped','达到轮次上限 '+goal.maxTurns);return}if(Date.now()-goal.startedAt>goal.maxMinutes*60000){finishGoal('stopped','超过时间上限 '+goal.maxMinutes+' 分钟');return}if(turnTools===0){stalledTurns++;if(stalledTurns>=2){finishGoal('stopped','连续两轮没有工具动作（停滞检测）');return}}else stalledTurns=0;let verdict:'met'|'not_met'|'impossible';let reason:string;let missing:string[]=[];if(goal.verify){const r=await runVerify(goal.verify);verdict=r.ok?'met':'not_met';reason=r.ok?'验收命令通过':('验收命令未通过：'+r.out.slice(-200));if(!r.ok)missing=[r.out.slice(-200)]}else{const j=await judgeGoal(evidence());verdict=j.verdict;reason=j.reason;missing=j.missing}goal.history.push({turn:goal.turns,verdict,reason});if(goal.history.length>50)goal.history=goal.history.slice(-50);if(verdict==='met'){finishGoal('done',reason||'验收通过');return}if(verdict==='impossible'){finishGoal('failed',reason||'判定不可达');return}goal.lastReason=reason;await saveGoal();await continueGoal(reason,missing)}catch(e){finishGoal('paused','评审异常：'+(e as Error).message)}finally{goalBusy=false;turnTools=0}}
+let restarting=false;
 let child:ChildProcessWithoutNullStreams, dead=false,ready=false,busy=false,phase='启动中',state:RecordValue={},messages:RecordValue[]=[],models:RecordValue[]=[],levels:string[]=[],commands:RecordValue[]=[],dialogs:RecordValue[]=[],notices:{id:string;text:string}[]=[],activeMessage=-1,noticeSeq=0;
 const tools=new Map<string,RecordValue>();
 const pending=new Map<string,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
 const clients=new Set<WebSocket>();
-let revision=0,timer:ReturnType<typeof setTimeout>|undefined;
+let revision=0,timer:ReturnType<typeof setTimeout>|undefined,lastPayloadSize=0;
 function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices:notices.map(n=>n.text),goal:goalPublic()}}
-function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;const data=JSON.stringify(snapshot());for(const ws of clients){if(ws.bufferedAmount>8e6){ws.close(1013,'Reconnect');continue}if(ws.readyState===WebSocket.OPEN)ws.send(data)}},70)}
+function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;
+ const open=[...clients].filter(ws=>ws.readyState===WebSocket.OPEN);if(!open.length)return;
+ const data=JSON.stringify(snapshot());lastPayloadSize=data.length;
+ const limit=Math.max(1_000_000,data.length*2);
+ for(const ws of open){if(ws.bufferedAmount>limit)continue;ws.send(data)}
+},lastPayloadSize>800_000?Math.min(1200,350+Math.floor(lastPayloadSize/1_000_000)*150):70)}
 const NOTICE_TTL_MS=Number(process.env.PI_CHAT_NOTICE_TTL_MS||30000);
 function notice(s:string){
  if(notices.length&&notices[notices.length-1].text===s)return;
@@ -79,11 +85,12 @@ async function start(){
  child=spawn(process.env.PI_CHAT_BIN||'pi',args,{cwd,env:process.env,stdio:['pipe','pipe','pipe']});
  let buffer='';child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{buffer+=chunk;let idx;while((idx=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,idx);buffer=buffer.slice(idx+1);if(line.trim())try{handle(JSON.parse(line))}catch{notice('Pi 返回无法解析的协议记录')}}});
  child.stderr.on('data',chunk=>process.stderr.write(chunk));
- const fail=(text:string)=>{dead=true;ready=false;busy=false;phase='进程已停止';for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error(text))}pending.clear();notice(text)};
+ const fail=(text:string)=>{if(restarting){ready=false;busy=false;return}dead=true;ready=false;busy=false;phase='进程已停止';for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error(text))}pending.clear();notice(text)};
  child.on('error',e=>fail(e.message));child.on('exit',(code,signal)=>fail(`Pi 已退出 (${code??signal})，请重启服务。`));
  await refresh();messages=(await rpc('get_messages')).messages;
  models=(await rpc('get_available_models')).models.map((m:RecordValue)=>({id:m.id,name:m.name,provider:m.provider}));
  commands=(await rpc('get_commands')).commands.map((c:RecordValue)=>({name:c.name,description:c.description}));if(!commands.some((c:RecordValue)=>c.name==='goal'))commands.push({name:'goal',description:'设定目标并自动推进到验收通过'});
+ for(const [n,d] of Object.entries(TERM))if(!commands.some((c:RecordValue)=>c.name===n))commands.push({name:n,description:'⚡ '+d.desc});
  busy=Boolean(state.isStreaming||state.isCompacting);ready=true;phase=busy?'运行中':'就绪';broadcast();
 }
 async function startGoal(objective:any,verifyRaw:any,maxTurnsRaw:any,maxMinutesRaw:any){
@@ -119,6 +126,57 @@ function parseGoalArg(text:string){
  const objective=text.replace(/--verify(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/,'').replace(/--turns(?:=|\s+)\d+/,'').trim();
  return {op:'start' as const,objective,verify:v?(v[1]||v[2]||v[3]):null,maxTurns:t?Number(t[1]):8};
 }
+// ---- 终端专用斜杠命令：在网页里用同样的名字执行（映射到 RPC，而非假装支持）----
+function fmtNum(n:any){return typeof n==='number'?n.toLocaleString('en-US'):String(n??'?')}
+async function restartPi(reason:string){
+ if(restarting)throw new Error('正在重载中');
+ restarting=true;ready=false;phase='重载中';broadcast();
+ const old=child;
+ const gone=new Promise<void>(res=>{const t=setTimeout(res,6000);try{old.once('exit',()=>{clearTimeout(t);res()})}catch{clearTimeout(t);res()}try{old.kill('SIGTERM')}catch{clearTimeout(t);res()}});
+ await gone;dead=false;
+ try{await start();notice(reason);return {ok:true}}
+ finally{restarting=false;broadcast()}
+}
+const TERM:Record<string,{desc:string;guard?:boolean;run:(arg:string)=>Promise<any>}> = {
+ compact:{desc:'压缩上下文（可跟自定义指令）',guard:true,run:async arg=>{
+  phase='压缩上下文';broadcast();
+  const d=await rpc('compact',arg?{customInstructions:arg}:{});
+  const msg=`已压缩：${fmtNum(d?.tokensBefore)} → ≈${fmtNum(d?.estimatedTokensAfter)} tokens`+(d?.usage?.cost?.total!=null?`，花费 $${Number(d.usage.cost.total).toFixed(4)}`:'');
+  notice(msg);return {tokensBefore:d?.tokensBefore,estimatedTokensAfter:d?.estimatedTokensAfter,summary:String(d?.summary||'').slice(0,800)}}},
+ cost:{desc:'查看 token / 费用 / 上下文占用',run:async()=>{
+  const s=await rpc('get_session_stats');
+  const tok=s.tokens||{},cu=s.contextUsage||{};
+  notice(`token：入 ${fmtNum(tok.input)} / 出 ${fmtNum(tok.output)} / 缓存 ${fmtNum(tok.cacheRead)} / 合计 ${fmtNum(tok.total)} · 费用 $${Number(s.cost||0).toFixed(4)}`+(cu.tokens!=null?` · 上下文 ${cu.percent}%（${fmtNum(cu.tokens)}/${fmtNum(cu.contextWindow)}）`:''));
+  return s}},
+ session:{desc:'当前会话信息与统计',run:async()=>{
+  const s=await rpc('get_session_stats');const st=await rpc('get_state');
+  notice(`会话 ${st.sessionName||state.sessionName||state.sessionId} · 消息 ${s.totalMessages}（用户 ${s.userMessages} / 助手 ${s.assistantMessages} / 工具 ${s.toolCalls}）· token 合计 ${fmtNum(s.tokens?.total)} · 费用 $${Number(s.cost||0).toFixed(4)}`);
+  return {...s,sessionName:st.sessionName||null}}},
+ name:{desc:'设置会话名（不带参数则显示当前名）',run:async arg=>{
+  if(!arg){const st=await rpc('get_state');notice('当前会话名：'+(st.sessionName||'（未命名）'));return {name:st.sessionName||null}}
+  await rpc('set_session_name',{name:arg});
+  const sess=registry.sessions.find(x=>x.key===registry.active);if(sess){sess.title=arg;await save()}
+  notice('会话已重命名为：'+arg);return {name:arg}}},
+ new:{desc:'新建会话',guard:true,run:async()=>{const r=await rpc('new_session');registry.sessions.unshift({key:randomUUID(),title:'新对话'});registry.active=registry.sessions[0].key;await save();await refresh();messages=(await rpc('get_messages')).messages;notice('已新建会话');return r}},
+ copy:{desc:'把最后一条回复放进编辑框',run:async()=>{
+  const d=await rpc('get_last_assistant_text');
+  for(const ws of clients)ws.send(JSON.stringify({type:'editor',text:d?.text||''}));
+  notice(d?.text?`已把最后一条回复（${d.text.length} 字符）放进输入框，可 Ctrl+C 复制`:'没有可复制的回复');
+  return {chars:(d?.text||'').length}}},
+ export:{desc:'导出会话为 HTML（可跟路径）',run:async arg=>{
+  const d=await rpc('export_html',arg?{outputPath:arg}:{});
+  notice('已导出：'+d?.path);return d}},
+ reload:{desc:'重载扩展 / 技能 / 模板 / 主题并重启 Pi',guard:true,run:async()=>restartPi('已重载：扩展、技能、模板、主题已重新加载（Pi 已重启，会话保留）')},
+ tree:{desc:'查看会话树摘要',run:async()=>{
+  const t=await rpc('get_tree');const n=Array.isArray(t?.entries)?t.entries.length:(Array.isArray(t?.tree)?t.tree.length:null);
+  notice('会话树：'+(n!=null?`${n} 个分支节点`:'已获取（见返回值）'));return t}},
+ model:{desc:'切换模型（不带参数则列出可用模型）',run:async arg=>{
+  if(!arg){notice('可用模型：'+models.map((m:RecordValue)=>m.id).slice(0,12).join(', '));return {models:models.map((m:RecordValue)=>m.id)}}
+  await rpc('set_model',{model:arg});await refresh();notice('已切换模型：'+arg);return {model:arg}}},
+ thinking:{desc:'设置思考等级（不带参数则列出）',run:async arg=>{
+  if(!arg){notice('可用等级：'+levels.join(', '));return {levels}}
+  await rpc('set_thinking_level',{level:arg});await refresh();notice('思考等级：'+arg);return {level:arg}}},
+};
 let mutating=false;
 async function command(c:RecordValue){
  if(!ready)throw new Error('Pi 尚未就绪');
@@ -131,6 +189,14 @@ async function command(c:RecordValue){
  try{
   if(c.action==='prompt'){
    if(typeof c.message!=='string'||!c.message.trim()||c.message.length>100000)throw new Error('消息不能为空且不能超过 100000 字符');
+   const tm=c.message.trim().match(/^\/([a-z-]+)(?:\s+([\s\S]*))?$/i);
+   if(tm&&TERM[tm[1].toLowerCase()]){
+    const def=TERM[tm[1].toLowerCase()];
+    if(def.guard&&busy)throw new Error('/'+tm[1]+' 需要等当前任务结束（或先停止）');
+    if(def.guard&&goal.status==='running'){goal.status='paused';goal.lastReason='用户执行 /'+tm[1]+'，目标已暂停';void saveGoal()}
+    const out=await def.run((tm[2]||'').trim());
+    return {handled:'/'+tm[1],output:out??null};
+   }
    if(busy)throw new Error('请等待当前任务完成，或先停止');
    if(/^\/goal(\s|$)/i.test(c.message.trim())){
     const cmd=parseGoalArg(c.message.trim().replace(/^\/goal\s*/i,'').trim());
@@ -138,7 +204,7 @@ async function command(c:RecordValue){
     if(cmd.op!=='status')notice('/goal '+cmd.op+' 已由服务端处理');
     return data;
    }
-   const slash=c.message.match(/^\/(\S+)/)?.[1];if(slash&&!commands.some(x=>x.name===slash))throw new Error('此命令不是已加载的扩展、技能或模板；终端专用命令不在网页执行');
+   const slash=c.message.match(/^\/(\S+)/)?.[1];if(slash&&!commands.some(x=>x.name===slash))throw new Error('此命令不是已加载的扩展、技能或模板（网页支持：/goal 与 ⚡ 标记的终端命令）；其余终端界面命令不在网页执行');
    if(goal.status==='running'){goal.status='paused';goal.lastReason='用户插话，目标已暂停（/goal resume 继续）';void saveGoal()}
    busy=true;phase='发送中';broadcast();
    try{await rpc('prompt',{message:c.message})}catch(e){busy=false;phase='就绪';throw e}
@@ -173,7 +239,9 @@ const server=http.createServer(async(req,res)=>{
 });
 const wss=new WebSocketServer({noServer:true,maxPayload:256*1024});
 server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws'||!allowedHosts.has(req.headers.host||'')||!origins.has(req.headers.origin||'')){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req))});
-wss.on('connection',ws=>{clients.add(ws);ws.send(JSON.stringify(snapshot()));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
+const heartbeat=setInterval(()=>{for(const ws of clients){const anyWs=ws as any;
+ if(anyWs.isAlive===false){ws.terminate();continue}anyWs.isAlive=false;try{ws.ping()}catch{}}},25000);(heartbeat as any).unref?.();
+wss.on('connection',ws=>{const anyWs=ws as any;anyWs.isAlive=true;ws.on('pong',()=>{anyWs.isAlive=true});clients.add(ws);ws.send(JSON.stringify(snapshot()));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
 server.on('error',e=>{console.error(e.message);process.exit(1)});
 server.listen(port,'127.0.0.1',()=>{console.log(`Pi Chat http://localhost:${port} · ${cwd}`);void start().catch(e=>notice('初始化失败：'+e.message))});
 function shutdown(){server.close();for(const ws of clients)ws.close();child?.stdin.end();setTimeout(()=>{child?.kill('SIGTERM');process.exit()},3000).unref()}
