@@ -75,43 +75,61 @@ async function start(){
  child.on('error',e=>fail(e.message));child.on('exit',(code,signal)=>fail(`Pi 已退出 (${code??signal})，请重启服务。`));
  await refresh();messages=(await rpc('get_messages')).messages;
  models=(await rpc('get_available_models')).models.map((m:RecordValue)=>({id:m.id,name:m.name,provider:m.provider}));
- commands=(await rpc('get_commands')).commands.map((c:RecordValue)=>({name:c.name,description:c.description}));
+ commands=(await rpc('get_commands')).commands.map((c:RecordValue)=>({name:c.name,description:c.description}));if(!commands.some((c:RecordValue)=>c.name==='goal'))commands.push({name:'goal',description:'设定目标并自动推进到验收通过'});
  busy=Boolean(state.isStreaming||state.isCompacting);ready=true;phase=busy?'运行中':'就绪';broadcast();
+}
+async function startGoal(objective:any,verifyRaw:any,maxTurnsRaw:any,maxMinutesRaw:any){
+ if(typeof objective!=='string'||!objective.trim()||objective.length>4000)throw new Error('目标不能为空且不超过 4000 字符');
+ if(busy||dialogs.length)throw new Error('请先结束当前任务或处理确认请求');
+ if(goal.status==='running')throw new Error('已有进行中的目标，先 /goal stop');
+ if(goalBusy)throw new Error('上一目标正在评审中，请稍候再试');
+ const verify=typeof verifyRaw==='string'&&verifyRaw.trim()?verifyRaw.trim():null;
+ goal={status:'running',objective:objective.trim(),verify,maxTurns:Math.min(Math.max(Number(maxTurnsRaw)||8,1),50),maxMinutes:Math.min(Math.max(Number(maxMinutesRaw)||30,1),240),turns:0,startedAt:Date.now(),lastReason:'',history:[]};
+ stalledTurns=0;turnTools=0;void saveGoal();
+ const s=registry.sessions.find(x=>x.key===registry.active)!;if(s.title==='新对话'){s.title='目标：'+goal.objective.slice(0,24);await save()}
+ busy=true;phase='目标启动';broadcast();
+ const kick='目标：'+goal.objective+'\n\n验收方式：'+(verify?'命令 `'+verify+'` 退出码为 0':'由独立评审模型根据对话中的证据判定')+'\n\n现在开始执行。每轮结束前给出：做了什么、证据（命令/文件/测试的真实输出）、还差什么。不要只声明完成。';
+ try{await rpc('prompt',{message:kick})}catch(e){busy=false;phase='就绪';goal.status='paused';void saveGoal();throw e}
+ return goalPublic();
+}
+async function stopGoal(){
+ if(!['running','paused'].includes(goal.status))return goalPublic();
+ const wasRunning=goal.status==='running';goal.status='stopped';goal.lastReason='用户停止';void saveGoal();broadcast();
+ if(wasRunning&&busy){try{await rpc('clear_queue');await rpc('abort')}catch{}}
+ return goalPublic();
+}
+async function resumeGoal(){
+ if(goal.status!=='paused')throw new Error('仅暂停的目标可以继续');
+ goal.status='running';goal.startedAt=Date.now();goal.turns=0;goal.lastReason='用户恢复';void saveGoal();await continueGoal('用户恢复目标');return goalPublic();
+}
+function parseGoalArg(text:string){
+ if(!text||/^status$/i.test(text))return {op:'status' as const};
+ if(/^(stop|clear|cancel|off|pause)$/i.test(text))return {op:'stop' as const};
+ if(/^resume$/i.test(text))return {op:'resume' as const};
+ const v=text.match(/--verify(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/);
+ const t=text.match(/--turns(?:=|\s+)(\d+)/);
+ const objective=text.replace(/--verify(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/,'').replace(/--turns(?:=|\s+)\d+/,'').trim();
+ return {op:'start' as const,objective,verify:v?(v[1]||v[2]||v[3]):null,maxTurns:t?Number(t[1]):8};
 }
 let mutating=false;
 async function command(c:RecordValue){
  if(!ready)throw new Error('Pi 尚未就绪');
  if(c.action==='dialog'){const d=dialogs.find(d=>d.id===c.dialogId);if(!d)throw new Error('此请求已过期');const answer:RecordValue={type:'extension_ui_response',id:d.id};if(c.cancelled)answer.cancelled=true;else if(d.method==='confirm')answer.confirmed=c.confirmed===true;else{if(typeof c.value!=='string'||(d.method==='select'&&!d.options.includes(c.value)))throw new Error('无效选项');answer.value=c.value}await write(answer);dialogs=dialogs.filter(item=>item.id!==d.id);broadcast();return}
  if(c.action==='stop'){const q=await rpc('clear_queue');await rpc('abort');return q}
- if(c.action==='goal-start'){
-  if(typeof c.objective!=='string'||!c.objective.trim()||c.objective.length>4000)throw new Error('目标不能为空且不超过 4000 字符');
-  if(busy||dialogs.length)throw new Error('请先结束当前任务或处理确认请求');
-  if(goal.status==='running')throw new Error('已有进行中的目标，先 /goal stop');
-  if(goalBusy)throw new Error('上一目标正在评审中，请稍候再试');
-  const verify=typeof c.verify==='string'&&c.verify.trim()?c.verify.trim():null;
-  goal={status:'running',objective:c.objective.trim(),verify,maxTurns:Math.min(Math.max(Number(c.maxTurns)||8,1),50),maxMinutes:Math.min(Math.max(Number(c.maxMinutes)||30,1),240),turns:0,startedAt:Date.now(),lastReason:'',history:[]};
-  stalledTurns=0;turnTools=0;void saveGoal();
-  const s=registry.sessions.find(x=>x.key===registry.active)!;if(s.title==='新对话'){s.title='目标：'+goal.objective.slice(0,24);await save()}
-  busy=true;phase='目标启动';broadcast();
-  const kick='目标：'+goal.objective+'\n\n验收方式：'+(verify?'命令 `'+verify+'` 退出码为 0':'由独立评审模型根据对话中的证据判定')+'\n\n现在开始执行。每轮结束前给出：做了什么、证据（命令/文件/测试的真实输出）、还差什么。不要只声明完成。';
-  try{await rpc('prompt',{message:kick})}catch(e){busy=false;phase='就绪';goal.status='paused';void saveGoal();throw e}
-  return goalPublic();
- }
- if(c.action==='goal-stop'){
-  if(!['running','paused'].includes(goal.status))return goalPublic();
-  const wasRunning=goal.status==='running';goal.status='stopped';goal.lastReason='用户停止';void saveGoal();broadcast();
-  if(wasRunning&&busy){try{await rpc('clear_queue');await rpc('abort')}catch{}}
-  return goalPublic();
- }
- if(c.action==='goal-resume'){
-  if(goal.status!=='paused')throw new Error('仅暂停的目标可以继续');
-  goal.status='running';goal.startedAt=Date.now();goal.turns=0;goal.lastReason='用户恢复';void saveGoal();await continueGoal('用户恢复目标');return goalPublic();
- }
+ if(c.action==='goal-start')return startGoal(c.objective,c.verify,c.maxTurns,c.maxMinutes);
+ if(c.action==='goal-stop')return stopGoal();
+ if(c.action==='goal-resume')return resumeGoal();
  if(mutating)throw new Error('正在处理上一项操作');mutating=true;
  try{
   if(c.action==='prompt'){
    if(typeof c.message!=='string'||!c.message.trim()||c.message.length>100000)throw new Error('消息不能为空且不能超过 100000 字符');
    if(busy)throw new Error('请等待当前任务完成，或先停止');
+   if(/^\/goal(\s|$)/i.test(c.message.trim())){
+    const cmd=parseGoalArg(c.message.trim().replace(/^\/goal\s*/i,'').trim());
+    const data=cmd.op==='status'?goalPublic():cmd.op==='stop'?await stopGoal():cmd.op==='resume'?await resumeGoal():await startGoal(cmd.objective,cmd.verify,cmd.maxTurns,undefined);
+    if(cmd.op!=='status')notice('/goal '+cmd.op+' 已由服务端处理');
+    return data;
+   }
    const slash=c.message.match(/^\/(\S+)/)?.[1];if(slash&&!commands.some(x=>x.name===slash))throw new Error('此命令不是已加载的扩展、技能或模板；终端专用命令不在网页执行');
    if(goal.status==='running'){goal.status='paused';goal.lastReason='用户插话，目标已暂停（/goal resume 继续）';void saveGoal()}
    busy=true;phase='发送中';broadcast();
