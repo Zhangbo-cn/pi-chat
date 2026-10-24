@@ -37,14 +37,23 @@ let child:ChildProcessWithoutNullStreams, dead=false,ready=false,busy=false,phas
 const tools=new Map<string,RecordValue>();
 const pending=new Map<string,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
 const clients=new Set<WebSocket>();
-let revision=0,timer:ReturnType<typeof setTimeout>|undefined,lastPayloadSize=0;
-function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices:notices.map(n=>n.text),goal:goalPublic()}}
+let revision=0,timer:ReturnType<typeof setTimeout>|undefined,lastPayloadSize=0,epoch=0,dirtyFrom=Number.POSITIVE_INFINITY;
+function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messageCount:messages.length,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices:notices.map(n=>n.text),goal:goalPublic()}}
+function snapshotBase(){const {messages:_messages,...rest}=snapshot() as RecordValue;return rest}
 function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;
  const open=[...clients].filter(ws=>ws.readyState===WebSocket.OPEN);if(!open.length)return;
- const data=JSON.stringify(snapshot());lastPayloadSize=data.length;
- const limit=Math.max(1_000_000,data.length*2);
- for(const ws of open){if(ws.bufferedAmount>limit)continue;ws.send(data)}
-},lastPayloadSize>800_000?Math.min(1200,350+Math.floor(lastPayloadSize/1_000_000)*150):70)}
+ const base=snapshotBase();
+ for(const ws of open){
+  const anyWs=ws as any;
+  const full=anyWs.epoch!==epoch;
+  const from=full?0:Math.min(anyWs.sent??0,activeMessage>=0?activeMessage:messages.length,dirtyFrom);
+  const data=JSON.stringify(full?{...base,messagesReset:true,messages}:{...base,messagesFrom:from,messages:messages.slice(from)});
+  lastPayloadSize=data.length;
+  if(ws.bufferedAmount>Math.max(1_000_000,data.length*2))continue;
+  ws.send(data);anyWs.epoch=epoch;anyWs.sent=messages.length;
+ }
+ dirtyFrom=Number.POSITIVE_INFINITY;
+},70)}
 const NOTICE_TTL_MS=Number(process.env.PI_CHAT_NOTICE_TTL_MS||30000);
 function notice(s:string){
  if(notices.length&&notices[notices.length-1].text===s)return;
@@ -63,7 +72,7 @@ function handle(e:RecordValue){
  if(e.type==='agent_settled'){busy=false;phase='就绪';activeMessage=-1;void refresh().then(()=>onGoalSettled()).catch(e=>notice(e.message))}
  if(e.type==='message_start'){messages.push(e.message);activeMessage=messages.length-1}
  if(e.type==='message_update'&&activeMessage>=0){const u=e.assistantMessageEvent,m=messages[activeMessage];if(!Array.isArray(m.content))m.content=[];const i=u.contentIndex;if(Number.isInteger(i)){if(u.type==='text_start')m.content[i]={type:'text',text:''};if(u.type==='thinking_start')m.content[i]={type:'thinking',thinking:''};for(const k of ['text','thinking']){if(u.type===k+'_delta'){m.content[i]??={type:k,[k]:''};m.content[i][k]=(m.content[i][k]||'')+u.delta}if(u.type===k+'_end')m.content[i]={type:k,[k]:u.content}}if(u.type==='toolcall_end')m.content[i]=u.toolCall}}
- if(e.type==='message_end'){if(activeMessage>=0&&messages[activeMessage]?.role===e.message.role)messages[activeMessage]=e.message;else messages.push(e.message);activeMessage=-1}
+ if(e.type==='message_end'){const idx=activeMessage>=0&&messages[activeMessage]?.role===e.message.role?activeMessage:messages.length;if(idx===messages.length)messages.push(e.message);else messages[idx]=e.message;dirtyFrom=Math.min(dirtyFrom,idx);activeMessage=-1}
  if(e.type==='tool_execution_start')turnTools++;
  if(e.type?.startsWith('tool_execution_')){const old=tools.get(e.toolCallId)||{};tools.set(e.toolCallId,{...old,id:e.toolCallId,name:e.toolName,args:e.args||old.args,status:e.type==='tool_execution_end'?(e.isError?'失败':'完成'):'执行中',result:e.result||e.partialResult||old.result})}
  if(e.type==='compaction_start')phase='压缩上下文';
@@ -87,7 +96,7 @@ async function start(){
  child.stderr.on('data',chunk=>process.stderr.write(chunk));
  const fail=(text:string)=>{if(restarting){ready=false;busy=false;return}dead=true;ready=false;busy=false;phase='进程已停止';for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error(text))}pending.clear();notice(text)};
  child.on('error',e=>fail(e.message));child.on('exit',(code,signal)=>fail(`Pi 已退出 (${code??signal})，请重启服务。`));
- await refresh();messages=(await rpc('get_messages')).messages;
+ await refresh();messages=(await rpc('get_messages')).messages;epoch++;
  models=(await rpc('get_available_models')).models.map((m:RecordValue)=>({id:m.id,name:m.name,provider:m.provider}));
  commands=(await rpc('get_commands')).commands.map((c:RecordValue)=>({name:c.name,description:c.description}));if(!commands.some((c:RecordValue)=>c.name==='goal'))commands.push({name:'goal',description:'设定目标并自动推进到验收通过'});
  for(const [n,d] of Object.entries(TERM))if(!commands.some((c:RecordValue)=>c.name===n))commands.push({name:n,description:'⚡ '+d.desc});
@@ -214,7 +223,7 @@ async function command(c:RecordValue){
    const target=c.action==='switch'?registry.sessions.find(s=>s.key===c.key):undefined;if(c.action==='switch'&&!target)throw new Error('找不到会话');
    const result=await rpc(target?.file?'switch_session':'new_session',target?.file?{sessionPath:target.file}:{});if(result?.cancelled)throw new Error('扩展取消了会话切换');
    if(target)registry.active=target.key;else{const s={key:randomUUID(),title:'新对话'};registry.sessions.unshift(s);registry.active=s.key}
-   tools.clear();messages=(await rpc('get_messages')).messages;await refresh();
+   tools.clear();messages=(await rpc('get_messages')).messages;epoch++;await refresh();
   }else if(c.action==='model'){
    if(busy)throw new Error('运行中不能切换模型');if(!models.some(m=>m.id===c.modelId&&m.provider===c.provider))throw new Error('未知模型');await rpc('set_model',{modelId:c.modelId,provider:c.provider});await refresh();
   }else if(c.action==='thinking'){
@@ -241,7 +250,7 @@ const wss=new WebSocketServer({noServer:true,maxPayload:256*1024});
 server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws'||!allowedHosts.has(req.headers.host||'')||!origins.has(req.headers.origin||'')){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req))});
 const heartbeat=setInterval(()=>{for(const ws of clients){const anyWs=ws as any;
  if(anyWs.isAlive===false){ws.terminate();continue}anyWs.isAlive=false;try{ws.ping()}catch{}}},25000);(heartbeat as any).unref?.();
-wss.on('connection',ws=>{const anyWs=ws as any;anyWs.isAlive=true;ws.on('pong',()=>{anyWs.isAlive=true});clients.add(ws);ws.send(JSON.stringify(snapshot()));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
+wss.on('connection',ws=>{const anyWs=ws as any;anyWs.isAlive=true;anyWs.epoch=epoch;anyWs.sent=messages.length;ws.on('pong',()=>{anyWs.isAlive=true});clients.add(ws);ws.send(JSON.stringify({...snapshotBase(),messagesReset:true,messages}));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
 server.on('error',e=>{console.error(e.message);process.exit(1)});
 server.listen(port,'127.0.0.1',()=>{console.log(`Pi Chat http://localhost:${port} · ${cwd}`);void start().catch(e=>notice('初始化失败：'+e.message))});
 function shutdown(){server.close();for(const ws of clients)ws.close();child?.stdin.end();setTimeout(()=>{child?.kill('SIGTERM');process.exit()},3000).unref()}
