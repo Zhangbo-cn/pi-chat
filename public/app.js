@@ -18,7 +18,49 @@ function connect(){socket=new WebSocket(`ws://${location.host}/ws`);socket.onope
 function controls(){const busy=snapshot?.busy;const enabled=connected&&snapshot?.ready;$('status').textContent=!connected?'连接断开 · 正在重连':snapshot?.phase||'启动中';$('send').textContent=busy?'■':'↑';$('send').setAttribute('aria-label',busy?'停止':'发送');$('send').disabled=!enabled||submitting||(!busy&&!$('prompt').value.trim());$('newChat').disabled=!enabled||busy;$('model').disabled=!enabled||busy;$('effort').disabled=!enabled||busy}
 function textContent(m){return typeof m.content==='string'?m.content:(m.content||[]).filter(b=>b?.type==='text').map(b=>b.text).join('\n')}
 function details(label,body,key,preview=''){return `<div class="activity"><details class="tool" data-key="${esc(key)}"><summary><span>${esc(label)}</span>${preview?`<span class="activity-preview">${esc(String(preview).split('\n')[0].slice(0,160))}</span>`:''}</summary><pre>${esc(body)}</pre></details></div>`}
-function render(){if(!snapshot)return;controls();renderGoal();const s=snapshot;const opened=new Set([...document.querySelectorAll('details[open]')].map(d=>d.dataset.key));const atBottom=$('scroll').scrollHeight-$('scroll').scrollTop-$('scroll').clientHeight<120;
+
+const FAV_BASE=document.title||'Pi Chat';
+const FAV_IDLE=document.querySelector('link[data-idle-icon]')?.href||'';
+let favSpin=null,favFrames=null,favActive=false,favDoneTimer=null,favPendingReset=null;
+function favLink(){let l=document.querySelector('link[rel="icon"]');if(!l){l=document.createElement('link');l.rel='icon';document.head.append(l)}return l}
+function favDraw(done,angle){
+ const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');
+ x.clearRect(0,0,64,64);
+ x.fillStyle=done?'#267b63':'#242424';
+ x.font='600 40px Georgia,"Times New Roman",serif';x.textAlign='center';x.textBaseline='middle';
+ x.fillText('π',32,33);
+ if(done){x.strokeStyle='#267b63';x.lineWidth=5;x.lineCap='round';x.beginPath();x.arc(32,32,27,0,Math.PI*2);x.stroke();
+  x.strokeStyle='#fff';x.lineWidth=6;x.beginPath();x.moveTo(21,33);x.lineTo(29,41);x.lineTo(44,24);x.stroke();}
+ else if(angle!==null){x.strokeStyle='#267b63';x.lineWidth=5;x.lineCap='round';x.beginPath();x.arc(32,32,27,angle,angle+Math.PI*0.65);x.stroke();}
+ return c.toDataURL('image/png');
+}
+function favSet(href){favLink().href=href}
+function favStop(){if(favSpin){clearInterval(favSpin);favSpin=null}}
+function favStart(animate){
+ if(favSpin||favActive)return;
+ favActive=true;
+ if(!animate){favSet(favDraw(false,null));document.title='● 运行中 · '+FAV_BASE;return}
+ favFrames=favFrames||Array.from({length:8},(_,i)=>favDraw(false,i*Math.PI/4));
+ let i=0;const tick=()=>favSet(favFrames[i++%8]);
+ tick();favSpin=setInterval(tick,170);
+ document.title='● 运行中 · '+FAV_BASE;
+}
+function favFinish(){
+ if(!favActive)return;
+ favActive=false;favStop();
+ if(favDoneTimer)clearTimeout(favDoneTimer);
+ favSet(favDraw(true,0));
+ document.title='✓ 完成 · '+FAV_BASE;
+ const reset=()=>{favPendingReset=null;favDoneTimer=null;if(favActive)return;favSet(FAV_IDLE);document.title=FAV_BASE};
+ if(document.hidden){favPendingReset=reset}else{favDoneTimer=setTimeout(reset,4000)}
+}
+function syncFavicon(){
+ const active=Boolean(snapshot?.busy)||snapshot?.goal?.status==='running';
+ if(active){if(favPendingReset){favPendingReset=null}if(favDoneTimer){clearTimeout(favDoneTimer);favDoneTimer=null}favStart(!matchMedia('(prefers-reduced-motion: reduce)').matches)}
+ else if(favActive)favFinish();
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&favPendingReset){const f=favPendingReset;favPendingReset=null;setTimeout(f,500)}});
+function render(){if(!snapshot)return;controls();renderGoal();syncFavicon();const s=snapshot;const opened=new Set([...document.querySelectorAll('details[open]')].map(d=>d.dataset.key));const atBottom=$('scroll').scrollHeight-$('scroll').scrollTop-$('scroll').clientHeight<120;
  $('title').textContent=s.sessions.find(x=>x.key===s.active)?.title||'新对话';$('history').innerHTML='';for(const x of s.sessions.filter(x=>x.title.toLowerCase().includes($('search').value.toLowerCase()))){const b=document.createElement('button');b.textContent=x.title;b.className=x.key===s.active?'active':'';b.disabled=s.busy;b.onclick=()=>act('switch',{key:x.key}).then(()=>{$('app').classList.remove('mobile-nav');error('')}).catch(()=>{});$('history').append(b)}
  const modelKey=JSON.stringify(s.models);if($('model').dataset.list!==modelKey){$('model').innerHTML='';s.models.forEach(m=>{const o=new Option(`${m.name||m.id}`,JSON.stringify([m.provider,m.id]));$('model').add(o)});$('model').dataset.list=modelKey}$('model').value=s.state.model?JSON.stringify([s.state.model.provider,s.state.model.id]):'';
  const levelKey=JSON.stringify(s.levels);if($('effort').dataset.list!==levelKey){$('effort').innerHTML='';s.levels.forEach(l=>$('effort').add(new Option(`思考 · ${l}`,l)));$('effort').dataset.list=levelKey}$('effort').value=s.state.thinkingLevel;
