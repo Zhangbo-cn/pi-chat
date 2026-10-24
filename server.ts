@@ -38,6 +38,7 @@ const tools=new Map<string,RecordValue>();
 const pending=new Map<string,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
 const clients=new Set<WebSocket>();
 let revision=0,timer:ReturnType<typeof setTimeout>|undefined,lastPayloadSize=0,epoch=0,dirtyFrom=Number.POSITIVE_INFINITY;
+const HISTORY_PAGE=Math.min(Math.max(Number(process.env.PI_CHAT_HISTORY_PAGE)||80,1),200);
 function snapshot(){return {type:'snapshot',revision:++revision,ready,busy,phase,state:{sessionId:state.sessionId,thinkingLevel:state.thinkingLevel,model:state.model?{id:state.model.id,provider:state.model.provider}:null},sessions:registry.sessions.map(({key,title})=>({key,title})),active:registry.active,messageCount:messages.length,messages,tools:[...tools.values()],models,levels,commands,dialogs,notices:notices.map(n=>n.text),goal:goalPublic()}}
 function snapshotBase(){const {messages:_messages,...rest}=snapshot() as RecordValue;return rest}
 function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;
@@ -47,7 +48,8 @@ function broadcast(){if(timer)return;timer=setTimeout(()=>{timer=undefined;
   const anyWs=ws as any;
   const full=anyWs.epoch!==epoch;
   const from=full?0:Math.min(anyWs.sent??0,activeMessage>=0?activeMessage:messages.length,dirtyFrom);
-  const data=JSON.stringify(full?{...base,messagesReset:true,messages}:{...base,messagesFrom:from,messages:messages.slice(from)});
+  const start=full?Math.max(0,messages.length-HISTORY_PAGE):from;
+  const data=JSON.stringify(full?{...base,messagesReset:true,messagesFrom:start,messages:messages.slice(start),hasMoreOlder:start>0}:{...base,messagesFrom:from,messages:messages.slice(from)});
   lastPayloadSize=data.length;
   if(ws.bufferedAmount>Math.max(1_000_000,data.length*2))continue;
   ws.send(data);anyWs.epoch=epoch;anyWs.sent=messages.length;
@@ -194,6 +196,12 @@ async function command(c:RecordValue){
  if(c.action==='goal-start')return startGoal(c.objective,c.verify,c.maxTurns,c.maxMinutes);
  if(c.action==='goal-stop')return stopGoal();
  if(c.action==='goal-resume')return resumeGoal();
+ if(c.action==='history'){
+  const before=Math.max(0,Math.floor(Number(c.before)||0));
+  const limit=Math.min(Math.max(Number(c.limit)||HISTORY_PAGE,1),200);
+  const from=Math.max(0,before-limit);
+  return {from,messages:messages.slice(from,before),hasMoreOlder:from>0,messageCount:messages.length};
+ }
  if(mutating)throw new Error('正在处理上一项操作');mutating=true;
  try{
   if(c.action==='prompt'){
@@ -250,7 +258,7 @@ const wss=new WebSocketServer({noServer:true,maxPayload:256*1024});
 server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws'||!allowedHosts.has(req.headers.host||'')||!origins.has(req.headers.origin||'')){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req))});
 const heartbeat=setInterval(()=>{for(const ws of clients){const anyWs=ws as any;
  if(anyWs.isAlive===false){ws.terminate();continue}anyWs.isAlive=false;try{ws.ping()}catch{}}},25000);(heartbeat as any).unref?.();
-wss.on('connection',ws=>{const anyWs=ws as any;anyWs.isAlive=true;anyWs.epoch=epoch;anyWs.sent=messages.length;ws.on('pong',()=>{anyWs.isAlive=true});clients.add(ws);ws.send(JSON.stringify({...snapshotBase(),messagesReset:true,messages}));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
+wss.on('connection',ws=>{const anyWs=ws as any;anyWs.isAlive=true;anyWs.epoch=epoch;anyWs.sent=messages.length;ws.on('pong',()=>{anyWs.isAlive=true});clients.add(ws);const hs=Math.max(0,messages.length-HISTORY_PAGE);ws.send(JSON.stringify({...snapshotBase(),messagesReset:true,messagesFrom:hs,messages:messages.slice(hs),hasMoreOlder:hs>0}));ws.on('close',()=>clients.delete(ws));ws.on('message',async raw=>{let c:RecordValue;try{c=JSON.parse(raw.toString());if(typeof c.id!=='string')throw new Error('缺少请求编号')}catch{ws.send(JSON.stringify({type:'result',ok:false,error:'无效请求'}));return}try{const data=await command(c);ws.send(JSON.stringify({type:'result',id:c.id,ok:true,data}))}catch(e){ws.send(JSON.stringify({type:'result',id:c.id,ok:false,error:(e as Error).message}))}})});
 server.on('error',e=>{console.error(e.message);process.exit(1)});
 server.listen(port,'127.0.0.1',()=>{console.log(`Pi Chat http://localhost:${port} · ${cwd}`);void start().catch(e=>notice('初始化失败：'+e.message))});
 function shutdown(){server.close();for(const ws of clients)ws.close();child?.stdin.end();setTimeout(()=>{child?.kill('SIGTERM');process.exit()},3000).unref()}

@@ -35,3 +35,4 @@ pre{overflow:auto;white-space:pre-wrap;background:#f7f7f7;padding:14px;border-ra
 @keyframes run-pulse{50%{opacity:.25}}
 .run-progress.disconnected .run-dot{animation:none}
 @media(prefers-reduced-motion:reduce){.run-dot{animation:none}}
+.older-wrap{display:flex;justify-content:center;padding:2px 0 14px}.older-wrap[hidden]{display:none}.older-wrap button{font-size:12px;color:#767676;border:1px solid var(--line);border-radius:16px;padding:6px 14px;background:#fff}.older-wrap button:hover{background:var(--soft)}

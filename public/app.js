@@ -10,13 +10,37 @@ function showToast(text){const t=$('toast');if(!t)return;t.textContent=text;t.hi
 const GOAL_LABELS={running:'进行中',paused:'已暂停',done:'已达成',failed:'判定不可达',stopped:'已停止'};
 function renderGoal(){const g=snapshot?.goal,bar=$('goalbar');if(!bar)return;if(!g||g.status==='idle'){bar.hidden=true;return}const label=GOAL_LABELS[g.status]||g.status;bar.hidden=false;$('goalText').textContent=g.objective;$('goalMeta').textContent=`${label} · 第 ${g.turns}/${g.maxTurns} 轮${g.lastReason?' · '+g.lastReason:''}`;$('goalStop').hidden=!['running','paused'].includes(g.status)}
 async function goalCommand(message){const arg=message.replace(/^\/goal\s*/i,'').trim();if(!arg||arg==='status'){const g=snapshot?.goal;showToast(g&&g.status!=='idle'?`${GOAL_LABELS[g.status]||g.status} · 第 ${g.turns}/${g.maxTurns} 轮 · ${g.objective}`:'没有进行中的目标。用法：/goal <目标> [--verify "命令"] [--turns N]');return}if(/^(stop|clear|cancel|off|pause)$/i.test(arg)){await act('goal-stop');showToast('目标已停止');return}if(/^resume$/i.test(arg)){await act('goal-resume');return}const v=arg.match(/--verify(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/);const t=arg.match(/--turns(?:=|\s+)(\d+)/);const objective=arg.replace(/--verify(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/,'').replace(/--turns(?:=|\s+)\d+/,'').trim();if(!objective){showToast('请给出目标描述');return}await act('goal-start',{objective,verify:v?(v[1]||v[2]||v[3]):null,maxTurns:t?Number(t[1]):8});$('prompt').value='';$('prompt').style.height='auto'}
-$('goalStop').onclick=()=>act('goal-stop').catch(()=>{});
+$('goalStop').onclick=()=>act('goal-stop').catch(()=>{});$('loadOlder').onclick=()=>loadOlder();
 function error(text){$('error').hidden=!text;$('error').textContent=text||''}
 function call(action,fields={}){return new Promise((resolve,reject)=>{if(!connected)return reject(new Error('连接已断开。未发送消息。'));const id=crypto.randomUUID();const timer=setTimeout(()=>{requests.delete(id);reject(new Error('操作响应超时。请检查会话状态，不要重复发送。'))},125000);requests.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,action,...fields}))})}
 async function act(action,fields={}){try{error('');return await call(action,fields)}catch(e){error(e.message);throw e}}
-let messageCache=[];
-function applySnapshot(data){const from=data.messagesFrom;if(Number.isInteger(from)&&!data.messagesReset&&Array.isArray(data.messages)){messageCache=messageCache.slice(0,Math.min(from,messageCache.length)).concat(data.messages)}else{messageCache=Array.isArray(data.messages)?data.messages.slice():[]}data.messages=messageCache;snapshot=data}
-function connect(){socket=new WebSocket(`ws://${location.host}/ws`);socket.onopen=()=>{connected=true;controls()};socket.onclose=()=>{connected=false;const progress=$('runProgress');if(progress){progress.classList.add('disconnected');progress.lastElementChild.textContent='连接已断开，正在重连'}for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error('连接断开，命令结果未知；重连后请检查会话，不会自动重发。'))}requests.clear();controls();setTimeout(connect,1500)};socket.onmessage=e=>{const data=JSON.parse(e.data);if(data.type==='result'){const p=requests.get(data.id);if(p){clearTimeout(p.timer);requests.delete(data.id);data.ok?p.resolve(data.data):p.reject(new Error(data.error))}}else if(data.type==='snapshot'){applySnapshot(data);render()}else if(data.type==='editor'){$('prompt').value=data.text||'';controls()}}}
+let messageCache=[],messageBase=0,historyMore=false,loadingOlder=false;
+function applySnapshot(data){
+ const from=data.messagesFrom;
+ if(Number.isInteger(from)&&!data.messagesReset&&Array.isArray(data.messages)){
+  const local=from-messageBase;
+  messageCache=local<0?messageCache:messageCache.slice(0,Math.min(local,messageCache.length)).concat(data.messages);
+ }else{
+  messageCache=Array.isArray(data.messages)?data.messages.slice():[];
+  messageBase=Number.isInteger(from)?from:0;
+  historyMore=Boolean(data.hasMoreOlder);
+ }
+ data.messages=messageCache;data.messageBase=messageBase;data.historyMore=historyMore;snapshot=data;
+}
+async function loadOlder(){
+ if(loadingOlder||messageBase<=0)return;
+ loadingOlder=true;
+ const sc=$('scroll'),prevH=sc.scrollHeight,prevTop=sc.scrollTop;
+ try{
+  const r=await act('history',{before:messageBase,limit:80});
+  messageCache=r.messages.concat(messageCache);messageBase=r.from;historyMore=r.hasMoreOlder;
+  if(snapshot){snapshot.messages=messageCache;snapshot.messageBase=messageBase;snapshot.historyMore=historyMore}
+  render();sc.scrollTop=prevTop+(sc.scrollHeight-prevH);
+ }catch{}finally{loadingOlder=false}
+}
+let renderQueued=false;
+function scheduleRender(){if(renderQueued)return;renderQueued=true;requestAnimationFrame(()=>{renderQueued=false;render()})}
+function connect(){socket=new WebSocket(`ws://${location.host}/ws`);socket.onopen=()=>{connected=true;controls()};socket.onclose=()=>{connected=false;const progress=$('runProgress');if(progress){progress.classList.add('disconnected');progress.lastElementChild.textContent='连接已断开，正在重连'}for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error('连接断开，命令结果未知；重连后请检查会话，不会自动重发。'))}requests.clear();controls();setTimeout(connect,1500)};socket.onmessage=e=>{const data=JSON.parse(e.data);if(data.type==='result'){const p=requests.get(data.id);if(p){clearTimeout(p.timer);requests.delete(data.id);data.ok?p.resolve(data.data):p.reject(new Error(data.error))}}else if(data.type==='snapshot'){applySnapshot(data);scheduleRender()}else if(data.type==='editor'){$('prompt').value=data.text||'';controls()}}}
 function controls(){const busy=snapshot?.busy;const enabled=connected&&snapshot?.ready;$('status').textContent=!connected?'连接断开 · 正在重连':snapshot?.phase||'启动中';$('send').textContent=busy?'■':'↑';$('send').setAttribute('aria-label',busy?'停止':'发送');$('send').disabled=!enabled||submitting||(!busy&&!$('prompt').value.trim());$('newChat').disabled=!enabled||busy;$('model').disabled=!enabled||busy;$('effort').disabled=!enabled||busy}
 function textContent(m){return typeof m.content==='string'?m.content:(m.content||[]).filter(b=>b?.type==='text').map(b=>b.text).join('\n')}
 function details(label,body,key,preview=''){return `<div class="activity"><details class="tool" data-key="${esc(key)}"><summary><span>${esc(label)}</span>${preview?`<span class="activity-preview">${esc(String(preview).split('\n')[0].slice(0,160))}</span>`:''}</summary><pre>${esc(body)}</pre></details></div>`}
@@ -62,7 +86,7 @@ function syncFavicon(){
  else if(favActive)favFinish();
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&favPendingReset){const f=favPendingReset;favPendingReset=null;setTimeout(f,500)}});
-function render(){if(!snapshot)return;controls();renderGoal();syncFavicon();const s=snapshot;const opened=new Set([...document.querySelectorAll('details[open]')].map(d=>d.dataset.key));const atBottom=$('scroll').scrollHeight-$('scroll').scrollTop-$('scroll').clientHeight<120;
+function render(){if(!snapshot)return;controls();renderGoal();syncFavicon();$('olderWrap').hidden=!historyMore;const s=snapshot;const opened=new Set([...document.querySelectorAll('details[open]')].map(d=>d.dataset.key));const atBottom=$('scroll').scrollHeight-$('scroll').scrollTop-$('scroll').clientHeight<120;
  $('title').textContent=s.sessions.find(x=>x.key===s.active)?.title||'新对话';$('history').innerHTML='';for(const x of s.sessions.filter(x=>x.title.toLowerCase().includes($('search').value.toLowerCase()))){const b=document.createElement('button');b.textContent=x.title;b.className=x.key===s.active?'active':'';b.disabled=s.busy;b.onclick=()=>act('switch',{key:x.key}).then(()=>{$('app').classList.remove('mobile-nav');error('')}).catch(()=>{});$('history').append(b)}
  const modelKey=JSON.stringify(s.models);if($('model').dataset.list!==modelKey){$('model').innerHTML='';s.models.forEach(m=>{const o=new Option(`${m.name||m.id}`,JSON.stringify([m.provider,m.id]));$('model').add(o)});$('model').dataset.list=modelKey}$('model').value=s.state.model?JSON.stringify([s.state.model.provider,s.state.model.id]):'';
  const levelKey=JSON.stringify(s.levels);if($('effort').dataset.list!==levelKey){$('effort').innerHTML='';s.levels.forEach(l=>$('effort').add(new Option(`思考 · ${l}`,l)));$('effort').dataset.list=levelKey}$('effort').value=s.state.thinkingLevel;
